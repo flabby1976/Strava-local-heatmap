@@ -31,6 +31,8 @@ import matplotlib.pyplot as plt
 
 from scipy.ndimage import gaussian_filter
 
+import xml.etree.cElementTree as ET
+
 # functions
 def deg2num(lat_deg, lon_deg, zoom): # return OSM x,y tile ID from lat,lon in degrees (from https://wiki.openstreetmap.org/wiki/Slippy_map_tilenames)
   lat_rad = np.radians(lat_deg)
@@ -68,7 +70,7 @@ def main(args): # main script
     # constants
     tile_size = [256, 256] # OSM tile size (default)
     zoom = 19 # OSM max zoom level (default)
-    colormap = 'hot' # matplotlib color map (from https://matplotlib.org/examples/color/colormaps_reference.html)
+    colormap = 'winter' # matplotlib color map (from https://matplotlib.org/examples/color/colormaps_reference.html)
 
     # find GPX files
     gpx_files = glob.glob(gpx_dir+'/'+gpx_filter)
@@ -81,21 +83,51 @@ def main(args): # main script
     lat_lon_data = [] # initialize latitude, longitude list
 
     for i in range(len(gpx_files)):
-        print('reading GPX file '+str(i+1)+'/'+str(len(gpx_files))+'...')
+        print('reading GPX file '+str(i+1)+'/'+str(len(gpx_files))+'...'+gpx_files[i])
 
-        with open(gpx_files[i]) as file:
-            for line in file:
-                if '<time' in line: # activity date
-                    tmp = re.findall('\d{4}', line)
+        tree=ET.ElementTree(file=gpx_files[i])
+        root=tree.getroot()
 
-                    if gpx_year in (tmp[0], 'all'):
-                        for line in file:
-                            if '<trkpt' in line: # trackpoints latitude, longitude
-                                tmp = re.findall('-?\d*\.?\d+', line)
+        tracks = root.findall('{http://www.topografix.com/GPX/1/1}trk')
+        for trk in tracks:
+            trksegs = trk.findall('{http://www.topografix.com/GPX/1/1}trkseg')
+            for trkseg in trksegs:
+                trkpoints = trkseg.findall('{http://www.topografix.com/GPX/1/1}trkpt')
+                for trkpt in trkpoints:
+                    coords = trkpt.attrib
+                    dt = trkpt.find('{http://www.topografix.com/GPX/1/1}time').text
+                    if gpx_year in (dt, 'all'):
+                        lat = float (coords['lat'])
+                        lon = float (coords['lon'])
+                        lat_lon_data.append([lat, lon])
 
-                                lat = float(tmp[0])
-                                lon = float(tmp[1])
+    # find TCX files
+    gpx_files = glob.glob(gpx_dir+'/*.tcx')
 
+    for i in range(len(gpx_files)):
+        print('reading TCX file '+str(i+1)+'/'+str(len(gpx_files))+'...'+gpx_files[i])
+
+        with open(gpx_files[i], 'r') as f:
+            output = f.read()
+        root=ET.fromstring(output.lstrip())
+
+        top = root.find('{http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2}Activities')
+        activities = top.findall('{http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2}Activity')
+        for activity in activities:
+            laps = activity.findall('{http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2}Lap')
+            for lap in laps:
+                tracks = lap.findall('{http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2}Track')
+                for track in tracks:
+                    trackpoints = track.findall('{http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2}Trackpoint')
+                    for trackpoint in trackpoints:
+                        coords = trackpoint.attrib
+                        dt = trackpoint.find('{http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2}Time').text
+                        if gpx_year in (dt, 'all'):
+                            position = trackpoint.find(
+                                '{http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2}Position')
+                            if position:
+                                lat = float(position.find('{http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2}LatitudeDegrees').text)
+                                lon = float(position.find('{http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2}LongitudeDegrees').text)
                                 lat_lon_data.append([lat, lon])
 
     if not lat_lon_data:
@@ -105,6 +137,8 @@ def main(args): # main script
     print('processing GPX data...')
 
     lat_lon_data = np.array(lat_lon_data) # convert list to NumPy array
+
+    print(lat_lon_data.size)
 
     # crop data to bounding box
     lat_lon_data = lat_lon_data[np.logical_and(lat_lon_data[:, 0] > lat_south_bound, lat_lon_data[:, 0] < lat_north_bound), :]
@@ -136,18 +170,21 @@ def main(args): # main script
 
     tile_count = (x_tile_max-x_tile_min+1)*(y_tile_max-y_tile_min+1) # total number of tiles
 
+    print(lat_max, lat_min, lon_max, lon_min )
+
     # download tiles
     if not os.path.exists('tiles'):
         os.mkdir('tiles')
 
+    print('downloading tiles if required...')
     i = 0
     for x in range(x_tile_min, x_tile_max+1):
         for y in range(y_tile_min, y_tile_max+1):
             tile_url = 'https://maps.wikimedia.org/osm-intl/'+str(zoom)+'/'+str(x)+'/'+str(y)+'.png' # (from https://wiki.openstreetmap.org/wiki/Tile_servers)
             tile_filename = 'tiles/tile_'+str(zoom)+'_'+str(x)+'_'+str(y)+'.png'
 
+            i = i + 1
             if not glob.glob(tile_filename): # check if tile already downloaded
-                i = i+1
                 print('downloading tile '+str(i)+'/'+str(tile_count)+'...')
 
                 try:
@@ -161,7 +198,7 @@ def main(args): # main script
                         file.write(response.read())
                     time.sleep(0.1)
 
-    print('creating heatmap...')
+    print('creating map background...')
 
     # create supertile
     supertile_size = [(y_tile_max-y_tile_min+1)*tile_size[0], (x_tile_max-x_tile_min+1)*tile_size[1], 3]
@@ -189,6 +226,7 @@ def main(args): # main script
 
     w_pixels = int(sigma_pixels) # add w_pixels (= Gaussian kernel sigma) pixels of padding around the trackpoints for better visualization
 
+    print('creating heatmap...')
     for k in range(len(lat_lon_data)):
         (x, y) = deg2xy(lat_lon_data[k, 0], lat_lon_data[k, 1], zoom)
 
@@ -205,8 +243,10 @@ def main(args): # main script
     else:
         m = 1.0
 
+    print('thresholding data...')
     data[data > m] = m # threshold data to maximum accumulation of trackpoints
 
+    print('filtering data...')
     # kernel density estimation = convolution with Gaussian kernel
     data = gaussian_filter(data, sigma_pixels)
 
